@@ -10,6 +10,9 @@
 #include <iostream>
 
 QPixmap Mat2QImage(Mat src);
+float meanPixel(Mat img);
+float autoGammaValue(Mat img);
+void adaptiveGammaCorrection(Mat img,Mat& dst, float alpha=0);
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -85,9 +88,15 @@ void MainWindow::on_pushButton_openPicture_clicked()
 
     // 展示新图
     matDst.convertTo(matDst,CV_8UC3,255.0);
+
+    Mat matGamma;
+    adaptiveGammaCorrection(matDst,matGamma,1.5);
+
+
     Mat gray;
-    cvtColor(matDst,gray,COLOR_BGR2GRAY);
+    cvtColor(matGamma,gray,COLOR_BGR2GRAY);
     threshold(gray,gray,0,255,THRESH_BINARY+THRESH_OTSU);
+    GaussianBlur(gray,gray,Size(5,5),0);
 
     QImage img2 = QImage(const_cast<unsigned char*>(gray.data),gray.cols,gray.rows,QImage::Format_Grayscale8);
     QPixmap scaledPixmap2 = QPixmap::fromImage(img2);
@@ -213,5 +222,130 @@ QPixmap Mat2QImage(Mat src) {
 
     QPixmap qimg = QPixmap::fromImage(img);
     return qimg;
+}
+
+
+
+
+// 摘自 https://github.com/GeorgeSeif/Image-Processing-OpenCV/blob/master/Gamma%20Correction%20and%20White%20Balance/enhance.cpp
+float meanPixel(Mat img)
+{
+    if (img.channels() > 2)
+    {
+        cvtColor(img.clone(), img, COLOR_BGR2GRAY);
+        return mean(img)[0];
+    }
+    else
+    {
+        return mean(img)[0];
+    }
+}
+
+float autoGammaValue(Mat img)
+{
+    float middle_pixel = 128;
+    float pixel_range = 256;
+    float mean_l = meanPixel(img);
+
+    float gamma = log(middle_pixel/pixel_range)/ log(mean_l/pixel_range); // Formula from ImageJ
+
+    return gamma;
+
+}
+
+
+void adaptiveGammaCorrection(Mat img,Mat& dst, float alpha)
+{
+
+    CV_Assert(img.data);
+
+    // Accept only char type matrices
+    CV_Assert(img.depth() != sizeof(uchar));
+
+    // Automatically compute the alpha value
+    if (alpha == 0) {alpha = autoGammaValue(img);}
+
+    // Get the image probability density function using the histogram
+    Mat gray_img;
+    if (img.channels() > 2)
+    {
+        cvtColor(img.clone(), gray_img, COLOR_BGR2GRAY);
+    }
+
+
+    // Establish the number of bins
+    int histSize = 256;
+
+    // Set the range
+    float range[] = { 0, 256 };
+    const float* histRange = { range };
+
+    bool uniform = true; bool accumulate = false;
+
+    Mat hist;
+
+    // Compute the histogram
+    calcHist(&gray_img, 1, 0, Mat(), hist, 1, &histSize, &histRange, uniform, accumulate);
+
+    Mat norm_hist = hist / gray_img.total();
+    double pdf_min = 0;
+    double pdf_max = 0;
+    minMaxLoc(norm_hist, &pdf_min, &pdf_max);
+
+    std::vector<float> pdf_weights;
+    for (int i = 0; i < 256; i++)
+    {
+        pdf_weights.push_back(pdf_max * (pow(( norm_hist.at<float>(i, 0) - pdf_min) / (pdf_max - pdf_min), alpha)  ));
+    }
+
+    std::vector<float> cdf_weights;
+    for (int i = 0; i < 256; i++)
+    {
+        if (i == 0)
+        {
+            cdf_weights.push_back((pdf_weights[i]));
+        }
+        else
+        {
+            cdf_weights.push_back((pdf_weights[i] + cdf_weights[i-1]) );
+        }
+
+    }
+
+    // Build look up table
+    unsigned char lut[256];
+    for (int i = 0; i < 256; i++)
+    {
+        float gamma = 1 - cdf_weights[i];
+        lut[i] = saturate_cast<uchar>(pow((float)(i / 255.0), gamma) * 255.0f);
+    }
+
+    dst = img.clone();
+    const int num_channels = dst.channels();
+    switch (num_channels)
+    {
+    case 1:
+    {
+        MatIterator_<uchar> it, end;
+        for (it = dst.begin<uchar>(), end = dst.end<uchar>(); it != end; it++)
+            *it = lut[(*it)];
+
+        break;
+    }
+    case 3:
+    {
+        MatIterator_<Vec3b> it, end;
+        for (it = dst.begin<Vec3b>(), end = dst.end<Vec3b>(); it != end; it++)
+        {
+
+            (*it)[0] = lut[((*it)[0])];
+            (*it)[1] = lut[((*it)[1])];
+            (*it)[2] = lut[((*it)[2])];
+        }
+
+        break;
+
+    }
+    }
 }
 
